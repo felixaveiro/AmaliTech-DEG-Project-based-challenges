@@ -299,7 +299,7 @@ This means:
 
 This diagram shows every possible flow through the gateway. Each flow ends with an audit log entry — written once, never deleted.
 
-> GitHub renders the diagram below automatically. No image upload needed.
+> I used Mermaid cause it is preferable with github .
 
 ```mermaid
 sequenceDiagram
