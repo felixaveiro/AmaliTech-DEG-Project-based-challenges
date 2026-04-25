@@ -297,56 +297,99 @@ This means:
 
 ## Sequence Diagram
 
-> GitHub renders this diagram automatically — no image needed.
+This diagram shows every possible flow through the gateway. Each flow ends with an audit log entry — written once, never deleted.
+
+> GitHub renders the diagram below automatically. No image upload needed.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant C as Client
-    participant G as Gateway
-    participant S as Store
-    participant A as Audit Log
+    participant C  as Client
+    participant G  as Gateway
+    participant S  as Store
+    participant AL as Audit Log
 
-    Note over C,A: Flow 1 — New payment (first time key is seen)
-    C->>G: POST /process-payment (Idempotency-Key: key-001)
-    G->>S: get_entry(key-001)
-    S-->>G: None — key not found
-    G->>S: create_entry(key-001, body_hash)
-    Note over G: sleep(2s) — simulates processing
-    G->>S: complete_entry(key-001, response)
-    G->>A: log(PROCESSED, 201)
-    G-->>C: 201 Created
+    %% ─────────────────────────────────────────
+    %% Flow 1 — Brand new payment
+    %% Client sends a key the server has never seen
+    %% ─────────────────────────────────────────
+    Note over C,AL: Flow 1 — Brand new payment (first time this key is seen)
 
-    Note over C,A: Flow 2 — Safe retry (same key, same body)
-    C->>G: POST /process-payment (Idempotency-Key: key-001)
-    G->>S: get_entry(key-001)
-    S-->>G: status=done, hash matches
-    G->>A: log(DUPLICATE, 200)
-    G-->>C: 200 OK — X-Cache-Hit: true
+    C  ->> G  : POST /process-payment + Idempotency-Key header
+    G  ->> S  : Does this key exist?
+    S  -->> G : No — never seen before
+    G  ->> S  : Save key, mark status as "processing"
+    Note over G: Gateway processes the payment (2 second window)
+    G  ->> S  : Save result, mark status as "done"
+    G  ->> AL : Write audit entry — outcome: PROCESSED, status: 201
+    G  -->> C : 201 Created — payment successful
 
-    Note over C,A: Flow 3 — Concurrent retry (in-flight, same key + body)
-    C->>G: Request A — POST (key-002)
-    G->>S: create_entry(key-002) — status: processing
-    C->>G: Request B — POST (key-002, same body)
-    G->>S: get_entry(key-002)
-    S-->>G: status: processing
-    Note over G: Request B calls event.wait() — blocks here
-    G->>S: complete_entry(key-002) — event.set()
-    G->>A: log(PROCESSED, 201)
-    G-->>C: Request A → 201 Created
-    Note over G: Request B unblocked by event
-    G->>A: log(IN_FLIGHT, 200)
-    G-->>C: Request B → 200 OK — X-Cache-Hit: true
+    %% ─────────────────────────────────────────
+    %% Flow 2 — Safe retry
+    %% Client resends the exact same request after a timeout
+    %% ─────────────────────────────────────────
+    Note over C,AL: Flow 2 — Safe retry (same key, same amount — network timeout recovery)
 
-    Note over C,A: Flow 4 — Conflict (same key, different body)
-    C->>G: POST /process-payment (key-001, amount: 500)
-    G->>S: get_entry(key-001)
-    S-->>G: status=done, hash mismatch
-    G->>A: log(CONFLICT, 422)
-    G-->>C: 422 Unprocessable Entity
+    C  ->> G  : POST /process-payment (same key, same body)
+    G  ->> S  : Does this key exist?
+    S  -->> G : Yes — already done, body hash matches
+    G  ->> AL : Write audit entry — outcome: DUPLICATE, status: 200
+    G  -->> C : 200 OK — X-Cache-Hit: true (not charged again)
 
-    Note over C,A: Flow 5 — Missing header
-    C->>G: POST /process-payment (no Idempotency-Key header)
-    G->>A: log(INVALID, 400)
-    G-->>C: 400 Bad Request
+    %% ─────────────────────────────────────────
+    %% Flow 3 — Two retries arrive at the same time
+    %% Gateway blocks the second until the first finishes
+    %% ─────────────────────────────────────────
+    Note over C,AL: Flow 3 — Concurrent retries (two requests arrive at the exact same millisecond)
+
+    C  ->> G  : Request A — POST (key-002)
+    G  ->> S  : Save key, mark as processing
+    C  ->> G  : Request B — POST (same key, same body, same time)
+    G  ->> S  : Does this key exist?
+    S  -->> G : Yes — still processing
+    Note over G: Request B calls event.wait() — it blocks here without crashing
+    G  ->> S  : A finishes — save result, fire completion signal
+    G  ->> AL : Write audit entry — outcome: PROCESSED, status: 201 (for A)
+    G  -->> C : Request A → 201 Created
+    Note over G: Request B wakes up and reads A's saved result
+    G  ->> AL : Write audit entry — outcome: IN_FLIGHT, status: 200 (for B)
+    G  -->> C : Request B → 200 OK — same result, no double charge
+
+    %% ─────────────────────────────────────────
+    %% Flow 4 — Conflict
+    %% Same key reused with a different amount (fraud or client bug)
+    %% ─────────────────────────────────────────
+    Note over C,AL: Flow 4 — Conflict (same key, different amount — possible fraud or bug)
+
+    C  ->> G  : POST /process-payment (key-001, amount: 500)
+    G  ->> S  : Does this key exist?
+    S  -->> G : Yes — done, but the body hash does not match
+    G  ->> AL : Write audit entry — outcome: CONFLICT, status: 422
+    G  -->> C : 422 Unprocessable Entity — key already committed to a different amount
+
+    %% ─────────────────────────────────────────
+    %% Flow 5 — Missing header
+    %% Client forgot to send the Idempotency-Key header
+    %% ─────────────────────────────────────────
+    Note over C,AL: Flow 5 — Missing header (client forgot to include Idempotency-Key)
+
+    C  ->> G  : POST /process-payment (no Idempotency-Key header)
+    Note over G: Rejected immediately — store is never contacted
+    G  ->> AL : Write audit entry — outcome: INVALID, status: 400
+    G  -->> C : 400 Bad Request — missing required header
 ```
+
+### Reading the diagram
+
+**Solid arrows** `→` mean a request is being sent.
+**Dashed arrows** `-->` mean a response is being returned.
+**Audit log arrows** appear at every response point — one entry is always written, no matter what happened.
+
+### What each audit outcome means
+
+| Outcome | When it happens | HTTP code |
+|---|---|---|
+| `PROCESSED` | First time a key is seen — payment executed | 201 |
+| `DUPLICATE` | Retry with same key and same body — served from cache | 200 |
+| `IN_FLIGHT` | Second concurrent request waited and got the first one's result | 200 |
+| `CONFLICT` | Same key reused with a different amount — rejected | 422 |
+| `INVALID` | No `Idempotency-Key` header sent — rejected immediately | 400 |
