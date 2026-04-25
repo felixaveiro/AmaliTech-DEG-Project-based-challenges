@@ -66,7 +66,7 @@ https://amalitech-deg-project-based-challenges-a1rw.onrender.com/docs
 The client generates a unique key (e.g. a UUID) for each payment intent and sends it as a request header:
 
 ```
-Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+Idempotency-Key: my-key-001 as string 
 ```
 
 The same key is sent on every retry of the same payment. The server uses this key to look up whether it has already processed this request.
@@ -133,7 +133,7 @@ Process a payment. Guaranteed to execute at most once per `Idempotency-Key`.
 {
   "status": "success",
   "message": "Charged 100.0 GHS",
-  "idempotency_key": "550e8400-e29b-41d4-a716-446655440000",
+  "idempotency_key": "my-key-001",
   "amount": 100.0,
   "currency": "GHS"
 }
@@ -160,7 +160,7 @@ Returns the full audit trail of every request that touched the API, oldest first
   {
     "id": 1,
     "timestamp": "2026-04-24T18:00:00Z",
-    "idempotency_key": "550e8400-e29b-41d4-a716-446655440000",
+    "idempotency_key": "my-key-001",
     "amount": 100.0,
     "currency": "GHS",
     "outcome": "PROCESSED",
@@ -169,7 +169,7 @@ Returns the full audit trail of every request that touched the API, oldest first
   {
     "id": 2,
     "timestamp": "2026-04-24T18:00:05Z",
-    "idempotency_key": "550e8400-e29b-41d4-a716-446655440000",
+    "idempotency_key": "my-key-001",
     "amount": 100.0,
     "currency": "GHS",
     "outcome": "DUPLICATE",
